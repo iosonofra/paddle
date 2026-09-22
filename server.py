@@ -11,9 +11,10 @@ os.environ["FLAGS_use_mkldnn"] = "0"
 os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
 os.environ["FLAGS_enable_pir_api"] = "0"
 
-# Ottimizzazioni per CPU Intel N150: 4 core fisici, memoria dinamica
-os.environ.setdefault("OMP_NUM_THREADS", "4")
-os.environ.setdefault("MKL_NUM_THREADS", "4")
+# Configurazione thread per PaddlePaddle compilato con OpenBLAS (evita crash di OpenBLAS multi-thread)
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 os.environ.setdefault("FLAGS_allocator_strategy", "auto_growth")
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
@@ -320,9 +321,13 @@ async def run_ocr(
     all_confidences = []
 
     try:
+        total_pages_count = len(pages_images)
+        logger.info(f"Avvio elaborazione OCR su {total_pages_count} pagina/e...")
+
         for page_idx, pil_img in enumerate(pages_images):
             img_np = np.array(pil_img)
             w, h = pil_img.size
+            logger.info(f"Elaborazione pagina {page_idx + 1}/{total_pages_count} ({w}x{h})...")
 
             # Invocazione flessibile dell'inferenza (compatibile sia 2.x che 3.x/PaddleX)
             raw_result = None
@@ -360,6 +365,7 @@ async def run_ocr(
             page_lines.sort(key=lambda item: (item["box"][0][1], item["box"][0][0]) if item["box"] else (0, 0))
 
             full_text = "\n".join([line["text"] for line in page_lines])
+            logger.info(f"Pagina {page_idx + 1}/{total_pages_count} completata: {len(page_lines)} righe rilevate.")
 
             pages_result.append({
                 "page_number": page_idx + 1,
