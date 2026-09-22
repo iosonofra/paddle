@@ -156,7 +156,7 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
                 cpu_threads=cpu_cores
             ),
             lambda: PaddleOCR()
-        ]
+        ])
 
         for init_attempt in attempts:
             try:
