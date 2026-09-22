@@ -59,6 +59,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Actions
   const copyTextBtn = document.getElementById("copyTextBtn");
+  const printDocBtn = document.getElementById("printDocBtn");
+  const printDropdownBtn = document.getElementById("printDropdownBtn");
   const exportDropdownBtn = document.getElementById("exportDropdownBtn");
   const exportMenu = document.getElementById("exportMenu");
   const exportPdfSearchableBtn = document.getElementById("exportPdfSearchableBtn");
@@ -86,6 +88,35 @@ document.addEventListener("DOMContentLoaded", () => {
   let isPanning = false;
   let startX = 0;
   let startY = 0;
+
+  // Reset completo dello stato dell'applicazione e dei campi testo
+  function resetAppState() {
+    currentOcrData = null;
+    currentPageIndex = 0;
+    if (fileInput) fileInput.value = "";
+    if (fullTextOutput) fullTextOutput.value = "";
+    if (linesListContainer) linesListContainer.innerHTML = `<div class="empty-state">Nessun dato ancora elaborato.</div>`;
+    if (jsonOutput) jsonOutput.textContent = "{}";
+    if (searchInput) searchInput.value = "";
+    if (searchMatchCount) searchMatchCount.classList.add("hidden");
+    if (searchNavBtns) searchNavBtns.classList.add("hidden");
+    if (clearSearchBtn) clearSearchBtn.classList.add("hidden");
+    if (searchBadgeCount) {
+      searchBadgeCount.classList.add("hidden");
+      searchBadgeCount.textContent = "0";
+    }
+    if (searchResultsContainer) searchResultsContainer.innerHTML = "";
+    if (statBoxes) statBoxes.textContent = "0";
+    if (statConf) statConf.textContent = "0.0%";
+    if (statTime) statTime.textContent = "0 ms";
+    if (canvasContainer) canvasContainer.classList.add("hidden");
+    if (dropzone) dropzone.classList.remove("hidden");
+    if (pdfNav) pdfNav.classList.add("hidden");
+  }
+
+  // Pulisci subito l'interfaccia all'avvio e ad ogni reload di pagina
+  resetAppState();
+  window.addEventListener("pageshow", resetAppState);
 
   // Initialize
   fetchSystemInfo();
@@ -158,6 +189,8 @@ document.addEventListener("DOMContentLoaded", () => {
   async function processFile(file) {
     if (!file) return;
 
+    // Reset immediato dell'interfaccia prima del nuovo caricamento
+    resetAppState();
     showLoading(true, "Caricamento ed elaborazione OCR...", "PaddleOCR sta analizzando il documento");
 
     const formData = new FormData();
@@ -513,18 +546,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Clear / New Document Button
-  clearBtn.addEventListener("click", () => {
-    currentOcrData = null;
-    canvasContainer.classList.add("hidden");
-    dropzone.classList.remove("hidden");
-    fileInput.value = "";
-    fullTextOutput.value = "";
-    linesListContainer.innerHTML = `<div class="empty-state">Nessun dato ancora elaborato.</div>`;
-    jsonOutput.textContent = "{}";
-    statBoxes.textContent = "0";
-    statConf.textContent = "0.0%";
-    statTime.textContent = "0 ms";
-  });
+  clearBtn.addEventListener("click", resetAppState);
 
   // 8. PDF Page Navigation
   prevPageBtn.addEventListener("click", () => {
@@ -772,9 +794,30 @@ document.addEventListener("DOMContentLoaded", () => {
     exportMenu.classList.toggle("show");
   });
 
-  window.addEventListener("click", () => {
-    exportMenu.classList.remove("show");
-  });
+  // Stampa nativa del documento originale a piena risoluzione
+  function triggerPrintOriginal() {
+    if (!currentOcrData || !currentOcrData.doc_id) {
+      showToast("Nessun documento attivo da stampare!", "error");
+      return;
+    }
+    const docId = currentOcrData.doc_id;
+    const printUrl = `/api/document/${docId}/original`;
+
+    showToast("Apertura finestra di stampa con PDF originale...", "info");
+    const printWindow = window.open(printUrl, "_blank");
+    if (printWindow) {
+      printWindow.addEventListener("load", () => {
+        try {
+          printWindow.print();
+        } catch (_) {}
+      });
+    } else {
+      showToast("Finestra popup bloccata dal browser. Consenti i popup per stampare.", "error");
+    }
+  }
+
+  if (printDocBtn) printDocBtn.addEventListener("click", triggerPrintOriginal);
+  if (printDropdownBtn) printDropdownBtn.addEventListener("click", triggerPrintOriginal);
 
   async function exportPdf(mode) {
     if (!currentOcrData) {
@@ -786,7 +829,11 @@ document.addEventListener("DOMContentLoaded", () => {
       const response = await fetch("/api/export/pdf", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: mode, ocr_data: currentOcrData })
+        body: JSON.stringify({
+          mode: mode,
+          ocr_data: currentOcrData,
+          doc_id: currentOcrData ? currentOcrData.doc_id : null
+        })
       });
       if (!response.ok) {
         throw new Error("Errore durante la generazione del PDF");

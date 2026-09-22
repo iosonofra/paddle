@@ -42,6 +42,9 @@ app.add_middleware(
 # Global model cache to avoid re-initializing models for repeated requests with same settings
 OCR_MODEL_CACHE: Dict[str, Any] = {}
 
+# Cache per i documenti originali (consente l'esportazione vettoriale pura senza perdita di qualità)
+ORIGINAL_DOC_CACHE: Dict[str, Dict[str, Any]] = {}
+
 SUPPORTED_LANGUAGES = [
     {"code": "it", "name": "Italiano", "flag": "🇮🇹"},
     {"code": "en", "name": "English", "flag": "🇬🇧"},
@@ -188,7 +191,7 @@ def startup_warmup():
     except Exception as e:
         logger.warning(f"Warmup non critico terminato con avviso: {e}")
 
-def image_to_base64(img: Image.Image, format: str = "JPEG", quality: int = 85) -> str:
+def image_to_base64(img: Image.Image, format: str = "JPEG", quality: int = 95) -> str:
     buffered = io.BytesIO()
     # Convert RGBA to RGB if saving as JPEG
     if format.upper() == "JPEG" and img.mode in ("RGBA", "P"):
@@ -207,10 +210,10 @@ def extract_images_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Image
     for page_idx in range(pages_to_render):
         page = pdf[page_idx]
         w, h = page.get_size()
-        # Risoluzione ideale per OCR ad altissima velocità su CPU Intel N150: max ~1024px
-        # A 1024px il testo è perfettamente nitido e DBNet riduce le computazioni del 40%
-        target_max = 1024.0
-        scale = min(1.6, max(0.5, target_max / max_dim)) if max_dim > 0 else 1.2
+        max_dim = max(w, h)
+        # Risoluzione bilanciata per qualità nitida ed eccellente velocità su CPU
+        target_max = 1280.0
+        scale = min(2.0, max(0.6, target_max / max_dim)) if max_dim > 0 else 1.5
 
         bitmap = page.render(scale=scale)
         pil_image = bitmap.to_pil()
@@ -498,6 +501,21 @@ async def run_ocr(
     # Determine input type
     is_pdf = file_ext == ".pdf" or file.content_type == "application/pdf"
 
+    # Salva il documento originale nella cache per consentire l'esportazione vettoriale pura (senza ricompressione)
+    import uuid
+    doc_id = str(uuid.uuid4())
+    ORIGINAL_DOC_CACHE[doc_id] = {
+        "bytes": contents,
+        "filename": filename,
+        "is_pdf": is_pdf,
+        "timestamp": time.time()
+    }
+    # Pulizia elementi scaduti (> 2 ore)
+    now = time.time()
+    expired_keys = [k for k, v in ORIGINAL_DOC_CACHE.items() if now - v.get("timestamp", 0) > 7200]
+    for k in expired_keys:
+        ORIGINAL_DOC_CACHE.pop(k, None)
+
     pages_images: List[Image.Image] = []
     if is_pdf:
         try:
@@ -609,6 +627,7 @@ async def run_ocr(
 
     return {
         "success": True,
+        "doc_id": doc_id,
         "filename": filename,
         "total_pages": len(pages_result),
         "total_boxes": total_boxes,
@@ -618,7 +637,108 @@ async def run_ocr(
         "pages": pages_result
     }
 
-def generate_structured_pdf(ocr_result: dict, mode: str = "searchable") -> bytes:
+def create_pypdf_searchable_overlay(original_pdf_bytes: bytes, ocr_data: dict) -> Optional[bytes]:
+    """
+    Fonde in modo vettoriale puro il livello di testo invisibile OCR sopra il PDF originale.
+    Conserva il 100% della qualità originale (risoluzione, elementi vettoriali, loghi, tabelle).
+    Zero ricompressione e zero perdita di definizione.
+    """
+    try:
+        import pypdf
+        from reportlab.pdfgen import canvas
+
+        orig_reader = pypdf.PdfReader(io.BytesIO(original_pdf_bytes))
+        pages_ocr = ocr_data.get("pages", [])
+        if not orig_reader.pages:
+            return None
+
+        # 1. Genera un PDF trasparente contenente ESCLUSIVAMENTE il testo invisibile (modo 3 Tr)
+        text_buf = io.BytesIO()
+        first_orig_page = orig_reader.pages[0]
+        init_w = float(first_orig_page.mediabox.width)
+        init_h = float(first_orig_page.mediabox.height)
+        c = canvas.Canvas(text_buf, pagesize=(init_w, init_h))
+
+        for page_idx, orig_page in enumerate(orig_reader.pages):
+            pw = float(orig_page.mediabox.width)
+            ph = float(orig_page.mediabox.height)
+            c.setPageSize((pw, ph))
+
+            if page_idx < len(pages_ocr):
+                page_data = pages_ocr[page_idx]
+                img_w = float(page_data.get("width", pw))
+                img_h = float(page_data.get("height", ph))
+
+                scale_x = pw / img_w if img_w > 0 else 1.0
+                scale_y = ph / img_h if img_h > 0 else 1.0
+
+                lines = page_data.get("lines", [])
+                for line in lines:
+                    text = line.get("text", "")
+                    if not text:
+                        continue
+                    box = line.get("box", [])
+                    if len(box) >= 4:
+                        xs = [pt[0] * scale_x for pt in box]
+                        ys = [pt[1] * scale_y for pt in box]
+                        x_min = float(min(xs))
+                        x_max = float(max(xs))
+                        y_min = float(min(ys))
+                        y_max = float(max(ys))
+                        box_w = max(1.0, x_max - x_min)
+                        box_h = max(1.0, y_max - y_min)
+
+                        # In coordinate PDF l'origine (0,0) è nell'angolo in basso a sinistra
+                        y_pdf = ph - y_max
+                        font_size = max(5.0, min(box_h * 0.75, 120.0))
+                        baseline_y = y_pdf + (box_h * 0.18)
+
+                        textobject = c.beginText()
+                        textobject.setTextOrigin(x_min, baseline_y)
+                        textobject.setFont("Helvetica", font_size)
+
+                        string_w = c.stringWidth(text, "Helvetica", font_size)
+                        if string_w > 0 and len(text) > 1 and box_w > string_w:
+                            char_space = (box_w - string_w) / (len(text) - 1)
+                            textobject.setCharSpace(min(char_space, font_size * 0.4))
+
+                        # Modo di rendering 3: testo invisibile, perfettamente selezionabile e ricercabile
+                        textobject._code.append("3 Tr")
+                        textobject.textLine(text)
+                        c.drawText(textobject)
+
+            c.showPage()
+
+        c.save()
+        text_buf.seek(0)
+
+        # 2. Fonde ciascuna pagina originale con la corrispondente pagina di testo invisibile
+        text_reader = pypdf.PdfReader(text_buf)
+        writer = pypdf.PdfWriter()
+
+        for page_idx, orig_page in enumerate(orig_reader.pages):
+            if page_idx < len(text_reader.pages):
+                orig_page.merge_page(text_reader.pages[page_idx], over=True)
+            writer.add_page(orig_page)
+
+        out_buf = io.BytesIO()
+        writer.write(out_buf)
+        out_buf.seek(0)
+        logger.info(f"Esportazione PDF vettoriale pura completata con pypdf: {len(writer.pages)} pagine (qualità originale 100%).")
+        return out_buf.getvalue()
+
+    except Exception as e:
+        logger.warning(f"Overlay pypdf non riuscito o libreria assente ({e}). Fallback su generatore raster.")
+        return None
+
+def generate_structured_pdf(ocr_result: dict, mode: str = "searchable", doc_info: Optional[Dict[str, Any]] = None) -> bytes:
+    # 1. Se PDF originale disponibile e modalità ricercabile, usa la fusione vettoriale pura senza perdita
+    if mode == "searchable" and doc_info and doc_info.get("is_pdf") and doc_info.get("bytes"):
+        pypdf_bytes = create_pypdf_searchable_overlay(doc_info["bytes"], ocr_result)
+        if pypdf_bytes is not None:
+            return pypdf_bytes
+
+    # 2. Generatore ReportLab (per PDF ricostruito, immagini originali o fallback)
     from reportlab.pdfgen import canvas
     from reportlab.lib.utils import ImageReader
 
@@ -701,12 +821,37 @@ async def export_pdf(payload: Dict[str, Any]):
     if not ocr_data:
         raise HTTPException(status_code=400, detail="Nessun dato OCR fornito per l'esportazione.")
 
-    pdf_bytes = generate_structured_pdf(ocr_data, mode=mode)
+    doc_id = payload.get("doc_id") or ocr_data.get("doc_id")
+    doc_info = ORIGINAL_DOC_CACHE.get(doc_id) if doc_id else None
+
+    pdf_bytes = generate_structured_pdf(ocr_data, mode=mode, doc_info=doc_info)
     filename = f"paddleocr_{mode}_{int(time.time())}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+@app.get("/api/document/{doc_id}/original")
+def get_original_document(doc_id: str):
+    """
+    Restituisce il documento originale caricato (PDF o immagine)
+    a piena risoluzione originale per la stampa diretta dal browser.
+    """
+    doc_info = ORIGINAL_DOC_CACHE.get(doc_id)
+    if not doc_info or "bytes" not in doc_info:
+        raise HTTPException(status_code=404, detail="Documento originale non trovato o scaduto dalla cache.")
+
+    is_pdf = doc_info.get("is_pdf", False)
+    media_type = "application/pdf" if is_pdf else "image/png"
+    filename = doc_info.get("filename", "documento_originale")
+
+    return Response(
+        content=doc_info["bytes"],
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"'
+        }
     )
 
 

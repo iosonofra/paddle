@@ -281,7 +281,7 @@
         <div class="tab-contents">
           <!-- Text View -->
           <div class="tab-pane active" id="textTab">
-            <textarea id="fullTextOutput" class="text-output" placeholder="Il testo riconosciuto apparirà qui..." readonly></textarea>
+            <textarea id="fullTextOutput" class="text-output" placeholder="Il testo riconosciuto apparirà qui..." readonly autocomplete="off"></textarea>
           </div>
 
           <!-- Lines View (Detail list) -->
@@ -306,12 +306,21 @@
 
         <!-- Export Actions Toolbar -->
         <div class="actions-panel">
-          <button class="btn btn-primary" id="copyTextBtn">
+          <button class="btn btn-primary" id="copyTextBtn" title="Copia tutto il testo estratto negli appunti">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
               <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
             </svg>
             <span>Copia Testo</span>
+          </button>
+
+          <button class="btn btn-secondary" id="printDocBtn" title="Stampa il documento originale in alta definizione">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 6 2 18 2 18 9"></polyline>
+              <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+              <rect x="6" y="14" width="12" height="8"></rect>
+            </svg>
+            <span>Stampa</span>
           </button>
 
           <div class="dropdown">
@@ -324,7 +333,9 @@
               <span>Esporta</span>
             </button>
             <div class="dropdown-menu" id="exportMenu">
-              <button class="dropdown-item" id="exportPdfSearchableBtn">📑 PDF Ricercabile (Sandwich: Grafica + Testo)</button>
+              <button class="dropdown-item" id="printDropdownBtn">🖨️ Stampa Documento Originale</button>
+              <div class="dropdown-divider"></div>
+              <button class="dropdown-item" id="exportPdfSearchableBtn">📑 PDF Ricercabile (Vettoriale 100% Fedele)</button>
               <button class="dropdown-item" id="exportPdfReconstructedBtn">📄 PDF Ricostruito (Testo Vettoriale con Layout)</button>
               <div class="dropdown-divider"></div>
               <button class="dropdown-item" id="exportTxtBtn">📄 File di Testo (.txt)</button>

@@ -23,5 +23,6 @@ openpyxl
 beautifulsoup4
 premailer
 reportlab>=5.0.0
+pypdf>=4.0.0
 fire>=0.3.0
 termcolor
