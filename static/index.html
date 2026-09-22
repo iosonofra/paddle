@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PaddleOCR Studio — Riconoscimento Testo & Documenti ad Alte Prestazioni</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="dark-theme">
+  <div class="app-layout">
+    <!-- Top Navigation Bar -->
+    <header class="navbar">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <polyline points="10 9 9 9 8 9"></polyline>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">PaddleOCR <span>Studio</span></h1>
+          <p class="brand-subtitle">Riconoscimento Ottico Avanzato per Immagini & PDF</p>
+        </div>
+      </div>
+
+      <!-- Quick Settings in Header -->
+      <div class="nav-controls">
+        <div class="control-group">
+          <label for="langSelect" class="control-label">Lingua</label>
+          <div class="select-wrapper">
+            <select id="langSelect" class="styled-select">
+              <option value="it" selected>🇮🇹 Italiano</option>
+              <option value="en">🇬🇧 English</option>
+              <option value="fr">🇫🇷 Français</option>
+              <option value="german">🇩🇪 Deutsch</option>
+              <option value="es">🇪🇸 Español</option>
+              <option value="pt">🇵🇹 Português</option>
+              <option value="ch">🇨🇳 Cinese (Semplificato)</option>
+              <option value="japan">🇯🇵 Giapponese</option>
+              <option value="korean">🇰🇷 Coreano</option>
+              <option value="latin">🌐 Latino / Multilingua</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label class="toggle-control" title="Rileva e ruota automaticamente testi inclinati o capovolti">
+            <input type="checkbox" id="angleClsToggle" checked>
+            <span class="toggle-slider"></span>
+            <span class="toggle-text">Rotazione Automatica</span>
+          </label>
+        </div>
+
+        <div class="hardware-pill" id="hwPill" title="Stato dell'accelerazione hardware">
+          <span class="pulse-indicator"></span>
+          <span id="hwStatus">Rilevamento...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="workspace">
+      <!-- Left: Visualizer / Upload Area -->
+      <section class="viewer-section" id="viewerSection">
+        
+        <!-- Upload State (visible when no image is loaded) -->
+        <div class="upload-dropzone" id="dropzone">
+          <input type="file" id="fileInput" accept="image/*,application/pdf" class="file-hidden-input">
+          
+          <div class="dropzone-content">
+            <div class="dropzone-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+            </div>
+            <h2>Trascina qui un'immagine o un documento PDF</h2>
+            <p class="dropzone-subtext">Supporta JPG, PNG, WEBP, TIFF e documenti PDF multipagina</p>
+            <div class="dropzone-actions">
+              <button class="btn btn-primary" id="browseBtn" type="button">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                Sfoglia File
+              </button>
+              <span class="or-separator">oppure premi <kbd>Ctrl</kbd> + <kbd>V</kbd> per incollare</span>
+            </div>
+
+            <!-- Demo sample chips -->
+            <div class="demo-samples">
+              <span class="samples-title">Oppure prova con un esempio:</span>
+              <div class="samples-list">
+                <button class="sample-chip" data-sample="receipt" type="button">🧾 Scontrino / Ricevuta</button>
+                <button class="sample-chip" data-sample="invoice" type="button">📄 Fattura Commerciale</button>
+                <button class="sample-chip" data-sample="signboard" type="button">🏷️ Cartello Stradale</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Viewer State (visible after upload/processing) -->
+        <div class="canvas-container hidden" id="canvasContainer">
+          <!-- Canvas Toolbar Floating -->
+          <div class="canvas-toolbar">
+            <div class="toolbar-group">
+              <button class="tool-btn" id="zoomInBtn" title="Ingrandisci (Rotella mouse su)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                  <line x1="11" y1="8" x2="11" y2="14"></line>
+                  <line x1="8" y1="11" x2="14" y2="11"></line>
+                </svg>
+              </button>
+              <button class="tool-btn" id="zoomOutBtn" title="Riduci (Rotella mouse giù)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                  <line x1="8" y1="11" x2="14" y2="11"></line>
+                </svg>
+              </button>
+              <button class="tool-btn" id="zoomFitBtn" title="Adatta allo schermo">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
+                </svg>
+              </button>
+              <span class="zoom-level" id="zoomDisplay">100%</span>
+            </div>
+
+            <div class="toolbar-divider"></div>
+
+            <div class="toolbar-group">
+              <button class="tool-btn active" id="toggleBoxesBtn" title="Mostra/Nascondi riquadri delimitatori">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="9" y1="3" x2="9" y2="21"></line>
+                </svg>
+                <span>Box</span>
+              </button>
+            </div>
+
+            <!-- PDF Page Navigator (shown if PDF has multiple pages) -->
+            <div class="toolbar-group pdf-nav hidden" id="pdfNav">
+              <button class="tool-btn" id="prevPageBtn" title="Pagina precedente">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+              </button>
+              <span class="page-indicator" id="pageIndicator">Pagina 1 / 1</span>
+              <button class="tool-btn" id="nextPageBtn" title="Pagina successiva">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+              </button>
+            </div>
+
+            <div class="toolbar-divider"></div>
+
+            <div class="toolbar-group">
+              <button class="tool-btn btn-danger-soft" id="clearBtn" title="Carica un nuovo documento">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M3 6h18"></path>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                </svg>
+                <span>Nuovo</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Interactive viewport with Canvas -->
+          <div class="viewport" id="viewport">
+            <div class="canvas-wrapper" id="canvasWrapper">
+              <canvas id="mainCanvas"></canvas>
+            </div>
+          </div>
+
+          <!-- Bottom Legend -->
+          <div class="viewer-footer">
+            <div class="confidence-legend">
+              <span class="legend-item"><span class="color-dot high"></span> Alta (> 85%)</span>
+              <span class="legend-item"><span class="color-dot med"></span> Media (60% - 85%)</span>
+              <span class="legend-item"><span class="color-dot low"></span> Bassa (< 60%)</span>
+            </div>
+            <div class="hint-text">💡 Trascina per spostare • Usa la rotella per zoomare • Clicca su un box per evidenziarlo</div>
+          </div>
+        </div>
+
+        <!-- Loading Overlay -->
+        <div class="loading-overlay hidden" id="loadingOverlay">
+          <div class="spinner-card">
+            <div class="glow-spinner"></div>
+            <h3 id="loadingText">Elaborazione PaddleOCR in corso...</h3>
+            <p id="loadingSubtext">Rilevamento delle coordinate e decodifica dei caratteri</p>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- Right: Results & Inspector Sidebar -->
+      <aside class="results-sidebar" id="resultsSidebar">
+        <!-- Top Stats Card -->
+        <div class="stats-panel">
+          <div class="stat-card">
+            <span class="stat-label">Riquadri</span>
+            <span class="stat-value" id="statBoxes">0</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Confidenza</span>
+            <span class="stat-value highlight-green" id="statConf">0.0%</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Tempo</span>
+            <span class="stat-value" id="statTime">0 ms</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Dispositivo</span>
+            <span class="stat-value" id="statDevice">CPU</span>
+          </div>
+        </div>
+
+        <!-- Tab Header -->
+        <div class="tab-header">
+          <button class="tab-btn active" data-tab="textTab">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="21" y1="10" x2="3" y2="10"></line>
+              <line x1="21" y1="6" x2="3" y2="6"></line>
+              <line x1="21" y1="14" x2="3" y2="14"></line>
+              <line x1="21" y1="18" x2="3" y2="18"></line>
+            </svg>
+            Testo Estratto
+          </button>
+          <button class="tab-btn" data-tab="linesTab">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="7" height="7"></rect>
+              <rect x="14" y="3" width="7" height="7"></rect>
+              <rect x="14" y="14" width="7" height="7"></rect>
+              <rect x="3" y="14" width="7" height="7"></rect>
+            </svg>
+            Righe & Confidenza
+          </button>
+          <button class="tab-btn" data-tab="searchTab" id="searchTabBtn">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            Risultati <span class="badge-count hidden" id="searchBadgeCount">0</span>
+          </button>
+          <button class="tab-btn" data-tab="jsonTab">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="16 18 22 12 16 6"></polyline>
+              <polyline points="8 6 2 12 8 18"></polyline>
+            </svg>
+            JSON Raw
+          </button>
+        </div>
+
+        <!-- Search Bar with Multi-Page Navigation -->
+        <div class="search-box">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input type="text" id="searchInput" placeholder="Cerca parole in tutte le pagine..." autocomplete="off">
+          <span id="searchMatchCount" class="search-match-count hidden">0 / 0</span>
+          <div class="search-nav-btns hidden" id="searchNavBtns">
+            <button class="search-nav-btn" id="searchPrevBtn" title="Risultato precedente (Shift+Invio)" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"></polyline></svg>
+            </button>
+            <button class="search-nav-btn" id="searchNextBtn" title="Risultato successivo (Invio)" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+          </div>
+          <button id="clearSearchBtn" class="clear-search hidden" title="Cancella ricerca" type="button">&times;</button>
+        </div>
+
+        <!-- Tab Contents -->
+        <div class="tab-contents">
+          <!-- Text View -->
+          <div class="tab-pane active" id="textTab">
+            <textarea id="fullTextOutput" class="text-output" placeholder="Il testo riconosciuto apparirà qui..." readonly></textarea>
+          </div>
+
+          <!-- Lines View (Detail list) -->
+          <div class="tab-pane" id="linesTab">
+            <div class="lines-list" id="linesListContainer">
+              <div class="empty-state">Nessun dato ancora elaborato.</div>
+            </div>
+          </div>
+
+          <!-- Search Results View (Global Multi-Page) -->
+          <div class="tab-pane" id="searchTab">
+            <div class="search-results-list" id="searchResultsContainer">
+              <div class="empty-state">Digita un termine nella barra di ricerca per visualizzare i risultati in tutte le pagine.</div>
+            </div>
+          </div>
+
+          <!-- JSON View -->
+          <div class="tab-pane" id="jsonTab">
+            <pre class="json-code" id="jsonOutput">{}</pre>
+          </div>
+        </div>
+
+        <!-- Export Actions Toolbar -->
+        <div class="actions-panel">
+          <button class="btn btn-primary" id="copyTextBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copia Testo</span>
+          </button>
+
+          <div class="dropdown">
+            <button class="btn btn-secondary" id="exportDropdownBtn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>Esporta</span>
+            </button>
+            <div class="dropdown-menu" id="exportMenu">
+              <button class="dropdown-item" id="exportPdfSearchableBtn">📑 PDF Ricercabile (Sandwich: Grafica + Testo)</button>
+              <button class="dropdown-item" id="exportPdfReconstructedBtn">📄 PDF Ricostruito (Testo Vettoriale con Layout)</button>
+              <div class="dropdown-divider"></div>
+              <button class="dropdown-item" id="exportTxtBtn">📄 File di Testo (.txt)</button>
+              <button class="dropdown-item" id="exportJsonBtn">📦 Dati Strutturati (.json)</button>
+              <button class="dropdown-item" id="exportCsvBtn">📊 Tabella Righe (.csv)</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

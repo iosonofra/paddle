@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  paddleocr-studio:
+    build: .
+    container_name: paddleocr-studio
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persistenza della cache dei modelli OCR per evitare di riscaricarli al riavvio
+      - paddle_cache:/root/.paddleocr
+    environment:
+      - TZ=Europe/Rome
+
+volumes:
+  paddle_cache:
