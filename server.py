@@ -86,16 +86,35 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
         last_err = None
 
         # Tentativi di inizializzazione compatibili sia con PaddleOCR 2.x che 3.x / PaddleX
-        # Nota: enable_mkldnn=False è essenziale per evitare il bug ConvertPirAttribute2RuntimeAttribute su CPU Intel
+        # Nota: disabilitiamo use_doc_unwarping (UVDoc) e use_doc_orientation_classify per evitare
+        # l'enorme consumo di RAM e calcolo del raddrizzamento 3D inutile su PDF piani che manda in crash la CPU.
         attempts = [
-            # 1. PaddleOCR 3.x moderno (use_textline_orientation + device)
-            lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls, device=device_str, enable_mkldnn=False),
-            lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls, enable_mkldnn=False),
+            # 1. PaddleOCR 3.x leggero e rapido (solo textline_ori + OCR, senza il pesante modello 3D UVDoc)
+            lambda: PaddleOCR(
+                lang=lang,
+                use_textline_orientation=use_angle_cls,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                device=device_str,
+                enable_mkldnn=False
+            ),
+            lambda: PaddleOCR(
+                lang=lang,
+                use_textline_orientation=use_angle_cls,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                device=device_str
+            ),
+            lambda: PaddleOCR(
+                lang=lang,
+                use_textline_orientation=use_angle_cls,
+                enable_mkldnn=False
+            ),
             # 2. PaddleOCR 2.x standard (use_angle_cls + use_gpu)
             lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, use_gpu=use_gpu, enable_mkldnn=False),
             lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, enable_mkldnn=False),
             lambda: PaddleOCR(lang=lang, enable_mkldnn=False),
-            # 3. Senza enable_mkldnn se il parametro non esiste
+            # 3. Senza enable_mkldnn
             lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls, device=device_str),
             lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls),
             lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, use_gpu=use_gpu),
