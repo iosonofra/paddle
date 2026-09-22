@@ -11,10 +11,11 @@ os.environ["FLAGS_use_mkldnn"] = "0"
 os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
 os.environ["FLAGS_enable_pir_api"] = "0"
 
-# Configurazione thread per PaddlePaddle compilato con OpenBLAS (evita crash di OpenBLAS multi-thread)
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
+# Configurazione multi-thread per sfruttare tutti i 4 core fisici della CPU Intel N150
+cpu_cores_count = str(os.cpu_count() or 4)
+os.environ["OMP_NUM_THREADS"] = cpu_cores_count
+os.environ["OPENBLAS_NUM_THREADS"] = cpu_cores_count
+os.environ["MKL_NUM_THREADS"] = cpu_cores_count
 os.environ.setdefault("FLAGS_allocator_strategy", "auto_growth")
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
@@ -86,62 +87,72 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
         engine = None
         last_err = None
 
-        # Tentativi di inizializzazione compatibili sia con PaddleOCR 2.x che 3.x / PaddleX
-        # Priorità a PP-OCRv4 Mobile: modello leggero (~4MB) da 1 secondo a pagina su CPU N150,
-        # rispetto al pesante PP-OCRv6_medium (35MB) che richiede fino a 60-100s.
+        cpu_cores = int(os.environ.get("OMP_NUM_THREADS", "4"))
+
+        # Tentativi di inizializzazione ottimizzati per velocità estrema su CPU (Intel N150):
+        # 1. PP-OCRv6 Small (7.7M params) - Leggerissimo, modernissimo, 50 lingue incl. italiano
+        # 2. PP-OCRv6 Tiny (1.5M params) - Ultraleggero edge
+        # 3. PP-OCRv4 Mobile - Il classico ultraleggero da 4MB
+        # Disabilitati categoricamente UVDoc (unwarping 3D) e orientation classify di pagina,
+        # che rallentavano di oltre 100 secondi su CPU!
         attempts = [
-            # 1. PaddleOCR v4 Mobile prioritario per CPU a basso consumo
+            # 1. PaddleOCR 3.7+ con PP-OCRv6 Small (ottimale per CPU N150: velocissimo e preciso)
+            lambda: PaddleOCR(
+                text_detection_model_name="PP-OCRv6_small_det",
+                text_recognition_model_name="PP-OCRv6_small_rec",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=use_angle_cls,
+                cpu_threads=cpu_cores
+            ),
+            # 2. PaddleOCR 3.7+ con PP-OCRv6 Tiny (massima velocità assoluta su CPU)
+            lambda: PaddleOCR(
+                text_detection_model_name="PP-OCRv6_tiny_det",
+                text_recognition_model_name="PP-OCRv6_tiny_rec",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=use_angle_cls,
+                cpu_threads=cpu_cores
+            ),
+            # 3. PaddleOCR 3.7+ con PP-OCRv4 Mobile
+            lambda: PaddleOCR(
+                text_detection_model_name="PP-OCRv4_mobile_det",
+                text_recognition_model_name="PP-OCRv4_mobile_rec",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=use_angle_cls,
+                cpu_threads=cpu_cores
+            ),
+            # 4. PaddleOCR 3.x standard senza modelli pesanti di preprocessing
+            lambda: PaddleOCR(
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=use_angle_cls,
+                cpu_threads=cpu_cores
+            ),
+            # 5. PaddleOCR 2.x standard con ocr_version PP-OCRv4
             lambda: PaddleOCR(
                 ocr_version="PP-OCRv4",
                 lang=lang,
-                use_textline_orientation=use_angle_cls,
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                device=device_str,
-                enable_mkldnn=False
+                use_angle_cls=use_angle_cls,
+                use_gpu=use_gpu,
+                cpu_threads=cpu_cores
             ),
             lambda: PaddleOCR(
                 ocr_version="PP-OCRv4",
                 lang=lang,
                 use_angle_cls=use_angle_cls,
-                use_gpu=False,
-                enable_mkldnn=False
-            ),
-            lambda: PaddleOCR(
-                ocr_version="PP-OCRv4",
-                lang=lang,
-                enable_mkldnn=False
-            ),
-            # 2. PaddleOCR 3.x / v6 moderno senza unwarping 3D
-            lambda: PaddleOCR(
-                lang=lang,
-                use_textline_orientation=use_angle_cls,
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                device=device_str,
-                enable_mkldnn=False
+                cpu_threads=cpu_cores
             ),
             lambda: PaddleOCR(
                 lang=lang,
-                use_textline_orientation=use_angle_cls,
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                device=device_str
+                use_angle_cls=use_angle_cls,
+                cpu_threads=cpu_cores
             ),
             lambda: PaddleOCR(
-                lang=lang,
-                use_textline_orientation=use_angle_cls,
-                enable_mkldnn=False
+                use_angle_cls=use_angle_cls,
+                cpu_threads=cpu_cores
             ),
-            # 3. PaddleOCR 2.x standard
-            lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, use_gpu=use_gpu, enable_mkldnn=False),
-            lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, enable_mkldnn=False),
-            lambda: PaddleOCR(lang=lang, enable_mkldnn=False),
-            lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls, device=device_str),
-            lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls),
-            lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, use_gpu=use_gpu),
-            lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls),
-            lambda: PaddleOCR(lang=lang),
             lambda: PaddleOCR()
         ]
 
@@ -181,9 +192,9 @@ def extract_images_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Image
         page = pdf[page_idx]
         w, h = page.get_size()
         max_dim = max(w, h)
-        # Risoluzione ideale per OCR su CPU Intel N150: max ~1500px
-        # Evita di generare bitmap da 30+ Megapixel su PDF già scansionati ad altissima risoluzione
-        target_max = 1500.0
+        # Risoluzione ideale per OCR ad altissima velocità su CPU Intel N150: max ~1280px
+        # A 1280px il testo da 8pt a 14pt è perfettamente nitido e DBNet compie l'inferenza in tempi minimi
+        target_max = 1280.0
         scale = min(2.0, max(0.5, target_max / max_dim)) if max_dim > 0 else 1.5
 
         bitmap = page.render(scale=scale)
@@ -196,7 +207,13 @@ def to_dict_safely(obj):
         return {}
     if isinstance(obj, dict):
         return obj
-    # Se ha un metodo o proprietà .json
+    # Se supporta keys() o item access
+    if hasattr(obj, "keys") and hasattr(obj, "__getitem__"):
+        try:
+            return {k: obj[k] for k in obj.keys()}
+        except Exception:
+            pass
+    # Se ha proprietà o metodo .json
     if hasattr(obj, "json"):
         try:
             val = obj.json() if callable(obj.json) else obj.json
@@ -207,7 +224,7 @@ def to_dict_safely(obj):
                 return json.loads(val)
         except Exception:
             pass
-    # Se ha un metodo o proprietà .res
+    # Se ha un dizionario interno .res
     if hasattr(obj, "res"):
         try:
             val = obj.res() if callable(obj.res) else obj.res
@@ -215,43 +232,47 @@ def to_dict_safely(obj):
                 return val
         except Exception:
             pass
-    # Se supporta __getitem__ (chiavi come dizionario)
-    if hasattr(obj, "__getitem__"):
-        try:
-            res_dict = {}
-            for k in ["rec_texts", "rec_text", "dt_polys", "rec_polys", "rec_boxes", "dt_boxes", "rec_scores", "rec_score", "overall_ocr_res", "ocr_res", "res"]:
-                try:
-                    res_dict[k] = obj[k]
-                except Exception:
-                    pass
-            if res_dict:
-                return res_dict
-        except Exception:
-            pass
-    try:
-        return dict(obj)
-    except Exception:
-        pass
     if hasattr(obj, "__dict__"):
-        return obj.__dict__
+        return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
     return {}
 
 def find_ocr_data(d):
     """
-    Cerca le chiavi dei testi e poligoni anche se annidate (es. d['overall_ocr_res'] o d['res'])
+    Cerca ricorsivamente le chiavi dei testi, poligoni e punteggi di confidenza.
     """
     if not isinstance(d, dict):
         return None, None, None
 
-    boxes = d.get("dt_polys") or d.get("rec_polys") or d.get("rec_boxes") or d.get("dt_boxes")
-    texts = d.get("rec_texts") or d.get("rec_text")
-    scores = d.get("rec_scores") or d.get("rec_score")
+    # Possibili chiavi per i poligoni/box
+    boxes = (
+        d.get("rec_polys") or
+        d.get("dt_polys") or
+        d.get("rec_boxes") or
+        d.get("dt_boxes") or
+        d.get("boxes") or
+        d.get("polys")
+    )
+    # Possibili chiavi per i testi
+    texts = (
+        d.get("rec_texts") or
+        d.get("rec_text") or
+        d.get("texts") or
+        d.get("text")
+    )
+    # Possibili chiavi per i punteggi
+    scores = (
+        d.get("rec_scores") or
+        d.get("rec_score") or
+        d.get("scores") or
+        d.get("score") or
+        d.get("confidences")
+    )
 
     if texts is not None:
         return boxes, texts, scores
 
-    # Controlla sotto-dizionari noti
-    for subkey in ["overall_ocr_res", "ocr_res", "res", "pipeline_res"]:
+    # Cerca nei sotto-dizionari noti
+    for subkey in ["res", "overall_ocr_res", "ocr_res", "pipeline_res", "result"]:
         if subkey in d and isinstance(d[subkey], dict):
             b, t, s = find_ocr_data(d[subkey])
             if t is not None:
@@ -266,6 +287,47 @@ def find_ocr_data(d):
 
     return None, None, None
 
+def parse_box_coordinates(box) -> List[List[float]]:
+    """
+    Normalizza qualsiasi formato di coordinate restituito da PaddleOCR / PaddleX
+    in una lista standard di 4 vertici: [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
+    """
+    if box is None:
+        return [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]]
+    if hasattr(box, "tolist"):
+        box = box.tolist()
+    if not isinstance(box, (list, tuple)):
+        return [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]]
+    
+    # 4 punti vertici [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
+    if len(box) == 4 and all(isinstance(pt, (list, tuple)) and len(pt) >= 2 for pt in box):
+        return [[round(float(pt[0]), 1), round(float(pt[1]), 1)] for pt in box[:4]]
+    
+    # Lista di 4 numeri scalari [x1, y1, x2, y2]
+    if len(box) == 4 and all(isinstance(coord, (int, float)) for coord in box):
+        x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+        return [
+            [round(x1, 1), round(y1, 1)],
+            [round(x2, 1), round(y1, 1)],
+            [round(x2, 1), round(y2, 1)],
+            [round(x1, 1), round(y2, 1)]
+        ]
+    
+    # Lista di 8 numeri scalari [x1, y1, x2, y2, x3, y3, x4, y4]
+    if len(box) == 8 and all(isinstance(coord, (int, float)) for coord in box):
+        return [
+            [round(float(box[0]), 1), round(float(box[1]), 1)],
+            [round(float(box[2]), 1), round(float(box[3]), 1)],
+            [round(float(box[4]), 1), round(float(box[5]), 1)],
+            [round(float(box[6]), 1), round(float(box[7]), 1)]
+        ]
+
+    # Poligono generico a N vertici
+    if len(box) >= 3 and all(isinstance(pt, (list, tuple)) and len(pt) >= 2 for pt in box):
+        return [[round(float(pt[0]), 1), round(float(pt[1]), 1)] for pt in box]
+
+    return [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]]
+
 def normalize_ocr_result(raw_result) -> List[Dict[str, Any]]:
     """
     Normalizza l'output OCR in una lista omogenea di riquadri:
@@ -274,43 +336,62 @@ def normalize_ocr_result(raw_result) -> List[Dict[str, Any]]:
         ...
     ]
     Supporta sia PaddleOCR 2.x standard che PaddleOCR 3.x / PaddleX
-    (annidamenti 'overall_ocr_res', 'dt_polys', 'rec_boxes', generatori, Result objects).
     """
     extracted_lines = []
     if raw_result is None:
         return extracted_lines
 
-    # Converti generatore o tupla in lista
-    if not isinstance(raw_result, list):
-        try:
-            raw_result = list(raw_result)
-        except Exception:
-            raw_result = [raw_result]
+    # Log diagnostico della struttura ricevuta
+    raw_type = type(raw_result).__name__
+    logger.info(f"Normalizzazione raw_result: tipo={raw_type}")
 
-    if len(raw_result) == 0:
+    # Se generatore o tupla, converti in lista
+    if not isinstance(raw_result, (list, tuple)):
+        raw_result = [raw_result]
+    else:
+        raw_result = list(raw_result)
+
+    if not raw_result:
         return extracted_lines
 
     first_item = raw_result[0]
 
-    # CASO 1: PaddleOCR 2.x standard -> raw_result = [ [ [box, (text, conf)], ... ] ]
-    # In 2.x first_item è una lista i cui elementi sono [box, (text, conf)]
-    if isinstance(first_item, list) and (len(first_item) == 0 or (len(first_item) > 0 and isinstance(first_item[0], list))):
-        for entry in first_item:
+    # CASO 1: PaddleOCR classico (2.x e backward-compatible 3.x)
+    # Formato: [ [ [box, (text, conf)], ... ] ] o [ [box, (text, conf)], ... ]
+    is_classic_nested = isinstance(first_item, (list, tuple)) and len(first_item) > 0 and isinstance(first_item[0], (list, tuple)) and len(first_item[0]) == 2
+    is_classic_flat = isinstance(first_item, (list, tuple)) and len(first_item) == 2 and (isinstance(first_item[1], (tuple, list)) or isinstance(first_item[1], (str, float)))
+
+    items_to_parse = None
+    if is_classic_nested:
+        items_to_parse = first_item
+    elif is_classic_flat:
+        items_to_parse = raw_result
+
+    if items_to_parse is not None:
+        for entry in items_to_parse:
             try:
                 if entry is None or len(entry) < 2:
                     continue
                 box = entry[0]
                 text_info = entry[1]
-                text = str(text_info[0]) if isinstance(text_info, (list, tuple)) else str(text_info)
-                conf = float(text_info[1]) if isinstance(text_info, (list, tuple)) and len(text_info) > 1 else 1.0
-                
-                box_pts = [[round(float(pt[0]), 1), round(float(pt[1]), 1)] for pt in box]
+                if isinstance(text_info, (list, tuple)):
+                    text = str(text_info[0]).strip()
+                    conf = float(text_info[1]) if len(text_info) > 1 else 1.0
+                else:
+                    text = str(text_info).strip()
+                    conf = 1.0
+
+                if not text:
+                    continue
+
+                box_pts = parse_box_coordinates(box)
                 extracted_lines.append({
                     "box": box_pts,
                     "text": text,
                     "confidence": round(conf, 4)
                 })
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Errore parsing riga classica: {e}")
                 continue
         if extracted_lines:
             return extracted_lines
@@ -322,9 +403,9 @@ def normalize_ocr_result(raw_result) -> List[Dict[str, Any]]:
 
         if texts is None:
             # Prova attributi diretti su res_obj
-            texts = getattr(res_obj, "rec_texts", None) or getattr(res_obj, "rec_text", None)
-            boxes = getattr(res_obj, "dt_polys", None) or getattr(res_obj, "rec_boxes", None)
-            scores = getattr(res_obj, "rec_scores", None) or getattr(res_obj, "rec_score", None)
+            texts = getattr(res_obj, "rec_texts", None) or getattr(res_obj, "rec_text", None) or getattr(res_obj, "texts", None)
+            boxes = getattr(res_obj, "rec_polys", None) or getattr(res_obj, "dt_polys", None) or getattr(res_obj, "rec_boxes", None) or getattr(res_obj, "boxes", None)
+            scores = getattr(res_obj, "rec_scores", None) or getattr(res_obj, "rec_score", None) or getattr(res_obj, "scores", None)
 
         if texts is None:
             continue
@@ -345,29 +426,8 @@ def normalize_ocr_result(raw_result) -> List[Dict[str, Any]]:
                     continue
                 conf = float(scores[i]) if i < len(scores) else 1.0
                 
-                # Gestione coordinate box
-                box_pts = []
-                if i < len(boxes):
-                    box = boxes[i]
-                    if hasattr(box, "tolist"):
-                        box = box.tolist()
-                    if len(box) == 4:
-                        if isinstance(box[0], (list, tuple)):
-                            # 4 vertici [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
-                            box_pts = [[round(float(pt[0]), 1), round(float(pt[1]), 1)] for pt in box]
-                        else:
-                            # 4 coordinate scalari [x1, y1, x2, y2]
-                            x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
-                            box_pts = [
-                                [round(x1, 1), round(y1, 1)],
-                                [round(x2, 1), round(y1, 1)],
-                                [round(x2, 1), round(y2, 1)],
-                                [round(x1, 1), round(y2, 1)]
-                            ]
-                
-                # Fallback geometrico se il poligono non è presente
-                if not box_pts:
-                    box_pts = [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]]
+                box = boxes[i] if i < len(boxes) else None
+                box_pts = parse_box_coordinates(box)
 
                 extracted_lines.append({
                     "box": box_pts,
@@ -466,13 +526,19 @@ async def run_ocr(
             # Invocazione flessibile dell'inferenza (compatibile sia 2.x che 3.x/PaddleX)
             raw_result = None
             try:
-                raw_result = ocr_engine.ocr(img_np, cls=use_angle_cls)
+                if hasattr(ocr_engine, "predict") and not hasattr(ocr_engine, "text_detector"):
+                    raw_result = ocr_engine.predict(img_np)
+                else:
+                    raw_result = ocr_engine.ocr(img_np, cls=use_angle_cls)
             except (TypeError, ValueError, Exception):
                 try:
                     raw_result = ocr_engine.ocr(img_np)
-                except Exception as call_err:
-                    logger.error(f"Errore chiamata inferenza ocr(): {call_err}")
-                    raise call_err
+                except Exception:
+                    try:
+                        raw_result = ocr_engine.predict(img_np)
+                    except Exception as call_err:
+                        logger.error(f"Errore chiamata inferenza ocr(): {call_err}")
+                        raise call_err
 
             normalized_lines = normalize_ocr_result(raw_result)
             logger.info(f"Pagina {page_idx + 1}: estratti {len(normalized_lines)} frammenti di testo.")
