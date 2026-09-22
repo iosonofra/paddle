@@ -59,7 +59,7 @@ echo ">>> [4/5] Pre-scaricamento modelli OCR (per avvio immediato)..."
 try:
     from paddleocr import PaddleOCR
     import numpy as np
-    ocr = PaddleOCR(use_angle_cls=True, lang='it', use_gpu=False, show_log=False)
+    ocr = PaddleOCR(use_angle_cls=True, lang='it', use_gpu=False)
     dummy = np.ones((50, 50, 3), dtype=np.uint8) * 255
     ocr.ocr(dummy, cls=True)
     print('Modelli pre-caricati con successo!')

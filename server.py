@@ -54,6 +54,9 @@ def check_gpu_support() -> bool:
 
 def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Optional[bool] = None):
     from paddleocr import PaddleOCR
+    import logging
+    # Disabilita messaggi di debug/info invasivi di PaddleOCR senza usare il parametro rimosso show_log
+    logging.getLogger('ppocr').setLevel(logging.ERROR)
     
     if use_gpu is None:
         use_gpu = check_gpu_support()
@@ -61,12 +64,24 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
     cache_key = f"{lang}_{use_angle_cls}_{use_gpu}"
     if cache_key not in OCR_MODEL_CACHE:
         logger.info(f"Caricamento modello PaddleOCR (lang={lang}, angle_cls={use_angle_cls}, gpu={use_gpu})...")
-        OCR_MODEL_CACHE[cache_key] = PaddleOCR(
-            use_angle_cls=use_angle_cls,
-            lang=lang,
-            use_gpu=use_gpu,
-            show_log=False
-        )
+        engine = None
+        # Tentativi di inizializzazione compatibili sia con PaddleOCR 2.x che 3.x
+        for init_attempt in [
+            lambda: PaddleOCR(use_angle_cls=use_angle_cls, lang=lang, use_gpu=use_gpu),
+            lambda: PaddleOCR(use_angle_cls=use_angle_cls, lang=lang),
+            lambda: PaddleOCR(lang=lang, use_gpu=use_gpu),
+            lambda: PaddleOCR(lang=lang)
+        ]:
+            try:
+                engine = init_attempt()
+                break
+            except (TypeError, ValueError, Exception) as err:
+                logger.warning(f"Inizializzazione PaddleOCR con parametri correnti fallita ({err}), provo fallback...")
+
+        if engine is None:
+            raise RuntimeError("Impossibile inizializzare il motore PaddleOCR con le opzioni fornite.")
+
+        OCR_MODEL_CACHE[cache_key] = engine
         logger.info("Modello PaddleOCR caricato con successo.")
     return OCR_MODEL_CACHE[cache_key]
 
@@ -166,8 +181,11 @@ async def run_ocr(
         img_np = np.array(pil_img)
         w, h = pil_img.size
 
-        # Run PaddleOCR
-        raw_result = ocr_engine.ocr(img_np, cls=use_angle_cls)
+        # Run PaddleOCR con fallback automatico sui parametri di inferenza
+        try:
+            raw_result = ocr_engine.ocr(img_np, cls=use_angle_cls)
+        except TypeError:
+            raw_result = ocr_engine.ocr(img_np)
 
         page_lines = []
         line_counter = 0
