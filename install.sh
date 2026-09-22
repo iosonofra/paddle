@@ -80,6 +80,10 @@ After=network.target
 Type=simple
 User=$TARGET_USER
 WorkingDirectory=$APP_DIR
+Environment="OMP_NUM_THREADS=4"
+Environment="MKL_NUM_THREADS=4"
+Environment="FLAGS_use_mkldnn=1"
+Environment="FLAGS_allocator_strategy=auto_growth"
 ExecStart=$APP_DIR/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5

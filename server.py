@@ -5,6 +5,13 @@ import base64
 import logging
 from typing import Optional, List, Dict, Any
 
+# Ottimizzazioni per CPU Intel (es. N100 / N150 / N95 / Alder Lake-N):
+# 4 core fisici = 4 thread OpenMP; attivazione oneDNN (MKLDNN) e gestione dinamica memoria
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("FLAGS_use_mkldnn", "1")
+os.environ.setdefault("FLAGS_allocator_strategy", "auto_growth")
+
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -64,22 +71,36 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
     cache_key = f"{lang}_{use_angle_cls}_{use_gpu}"
     if cache_key not in OCR_MODEL_CACHE:
         logger.info(f"Caricamento modello PaddleOCR (lang={lang}, angle_cls={use_angle_cls}, gpu={use_gpu})...")
-        engine = None
-        # Tentativi di inizializzazione compatibili sia con PaddleOCR 2.x che 3.x
-        for init_attempt in [
-            lambda: PaddleOCR(use_angle_cls=use_angle_cls, lang=lang, use_gpu=use_gpu),
-            lambda: PaddleOCR(use_angle_cls=use_angle_cls, lang=lang),
-            lambda: PaddleOCR(lang=lang, use_gpu=use_gpu),
-            lambda: PaddleOCR(lang=lang)
-        ]:
+        device_str = "gpu" if use_gpu else "cpu"
+        last_err = None
+
+        # Tentativi di inizializzazione compatibili sia con PaddleOCR 2.x che 3.x / PaddleX
+        attempts = [
+            # 1. PaddleOCR 3.x / Modern con textline_orientation e device
+            lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls, device=device_str),
+            # 2. PaddleOCR 3.x senza parametro device
+            lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls),
+            # 3. PaddleOCR 2.x standard (use_angle_cls + use_gpu)
+            lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, use_gpu=use_gpu),
+            # 4. PaddleOCR 2.x senza use_gpu
+            lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls),
+            # 5. Inizializzazione con solo lingua
+            lambda: PaddleOCR(lang=lang),
+            # 6. Minimo assoluto (default di sistema)
+            lambda: PaddleOCR()
+        ]
+
+        for init_attempt in attempts:
             try:
                 engine = init_attempt()
-                break
-            except (TypeError, ValueError, Exception) as err:
-                logger.warning(f"Inizializzazione PaddleOCR con parametri correnti fallita ({err}), provo fallback...")
+                if engine is not None:
+                    break
+            except Exception as err:
+                last_err = err
+                logger.warning(f"Inizializzazione PaddleOCR fallita con tentativo ({err}), provo alternativa...")
 
         if engine is None:
-            raise RuntimeError("Impossibile inizializzare il motore PaddleOCR con le opzioni fornite.")
+            raise RuntimeError(f"Impossibile inizializzare il motore PaddleOCR: {last_err}")
 
         OCR_MODEL_CACHE[cache_key] = engine
         logger.info("Modello PaddleOCR caricato con successo.")
