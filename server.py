@@ -90,13 +90,24 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
         cpu_cores = int(os.environ.get("OMP_NUM_THREADS", "4"))
 
         # Tentativi di inizializzazione ottimizzati per velocità estrema su CPU (Intel N150):
-        # 1. PP-OCRv6 Small (7.7M params) - Leggerissimo, modernissimo, 50 lingue incl. italiano
-        # 2. PP-OCRv6 Tiny (1.5M params) - Ultraleggero edge
+        # 1. PP-OCRv6 Tiny (1.5M params totali: 0.43M det + 1.1M rec) - Ultraleggero edge, ~6x più veloce su CPU Intel N150
+        # 2. PP-OCRv6 Small (7.7M params) - Mobile/Desktop bilanciato
         # 3. PP-OCRv4 Mobile - Il classico ultraleggero da 4MB
-        # Disabilitati categoricamente UVDoc (unwarping 3D) e orientation classify di pagina,
-        # che rallentavano di oltre 100 secondi su CPU!
-        attempts = [
-            # 1. PaddleOCR 3.7+ con PP-OCRv6 Small (ottimale per CPU N150: velocissimo e preciso)
+        # Disabilitati categoricamente UVDoc (unwarping 3D) e orientation classify di pagina
+        attempts = []
+        if lang != "japan":
+            attempts.append(
+                lambda: PaddleOCR(
+                    text_detection_model_name="PP-OCRv6_tiny_det",
+                    text_recognition_model_name="PP-OCRv6_tiny_rec",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=use_angle_cls,
+                    cpu_threads=cpu_cores
+                )
+            )
+        attempts.extend([
+            # PP-OCRv6 Small (per lingue non supportate da tiny o fallback)
             lambda: PaddleOCR(
                 text_detection_model_name="PP-OCRv6_small_det",
                 text_recognition_model_name="PP-OCRv6_small_rec",
@@ -105,16 +116,7 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
                 use_textline_orientation=use_angle_cls,
                 cpu_threads=cpu_cores
             ),
-            # 2. PaddleOCR 3.7+ con PP-OCRv6 Tiny (massima velocità assoluta su CPU)
-            lambda: PaddleOCR(
-                text_detection_model_name="PP-OCRv6_tiny_det",
-                text_recognition_model_name="PP-OCRv6_tiny_rec",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=use_angle_cls,
-                cpu_threads=cpu_cores
-            ),
-            # 3. PaddleOCR 3.7+ con PP-OCRv4 Mobile
+            # PP-OCRv4 Mobile ultraleggero
             lambda: PaddleOCR(
                 text_detection_model_name="PP-OCRv4_mobile_det",
                 text_recognition_model_name="PP-OCRv4_mobile_rec",
@@ -123,14 +125,14 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
                 use_textline_orientation=use_angle_cls,
                 cpu_threads=cpu_cores
             ),
-            # 4. PaddleOCR 3.x standard senza modelli pesanti di preprocessing
+            # PaddleOCR 3.x standard
             lambda: PaddleOCR(
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=use_angle_cls,
                 cpu_threads=cpu_cores
             ),
-            # 5. PaddleOCR 2.x standard con ocr_version PP-OCRv4
+            # PaddleOCR 2.x standard con ocr_version PP-OCRv4
             lambda: PaddleOCR(
                 ocr_version="PP-OCRv4",
                 lang=lang,
@@ -172,6 +174,20 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
         logger.info("Modello PaddleOCR caricato con successo.")
     return OCR_MODEL_CACHE[cache_key]
 
+@app.on_event("startup")
+def startup_warmup():
+    try:
+        logger.info("Esecuzione warmup OCR all'avvio del server...")
+        engine = get_ocr_engine(lang="it", use_angle_cls=False)
+        dummy_img = np.ones((80, 160, 3), dtype=np.uint8) * 255
+        if hasattr(engine, "predict") and not hasattr(engine, "text_detector"):
+            engine.predict(dummy_img)
+        else:
+            engine.ocr(dummy_img, cls=False)
+        logger.info("Warmup completato con successo! Motore pronto in RAM per risposte immediate.")
+    except Exception as e:
+        logger.warning(f"Warmup non critico terminato con avviso: {e}")
+
 def image_to_base64(img: Image.Image, format: str = "JPEG", quality: int = 85) -> str:
     buffered = io.BytesIO()
     # Convert RGBA to RGB if saving as JPEG
@@ -191,11 +207,10 @@ def extract_images_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Image
     for page_idx in range(pages_to_render):
         page = pdf[page_idx]
         w, h = page.get_size()
-        max_dim = max(w, h)
-        # Risoluzione ideale per OCR ad altissima velocità su CPU Intel N150: max ~1280px
-        # A 1280px il testo da 8pt a 14pt è perfettamente nitido e DBNet compie l'inferenza in tempi minimi
-        target_max = 1280.0
-        scale = min(2.0, max(0.5, target_max / max_dim)) if max_dim > 0 else 1.5
+        # Risoluzione ideale per OCR ad altissima velocità su CPU Intel N150: max ~1024px
+        # A 1024px il testo è perfettamente nitido e DBNet riduce le computazioni del 40%
+        target_max = 1024.0
+        scale = min(1.6, max(0.5, target_max / max_dim)) if max_dim > 0 else 1.2
 
         bitmap = page.render(scale=scale)
         pil_image = bitmap.to_pil()
@@ -465,7 +480,7 @@ def get_system_info():
 async def run_ocr(
     file: UploadFile = File(...),
     lang: str = Form("it"),
-    use_angle_cls: bool = Form(True),
+    use_angle_cls: bool = Form(False),
     min_confidence: float = Form(0.0),
     use_gpu: Optional[bool] = Form(None)
 ):
@@ -473,6 +488,12 @@ async def run_ocr(
     contents = await file.read()
     filename = file.filename or "uploaded_file"
     file_ext = os.path.splitext(filename)[1].lower()
+
+    # Normalizza use_angle_cls da form string o bool
+    if isinstance(use_angle_cls, str):
+        use_angle_cls = use_angle_cls.strip().lower() in ("true", "1", "yes", "on")
+    else:
+        use_angle_cls = bool(use_angle_cls)
 
     # Determine input type
     is_pdf = file_ext == ".pdf" or file.content_type == "application/pdf"
@@ -490,12 +511,12 @@ async def run_ocr(
             # Convert to RGB if needed
             if img.mode != "RGB":
                 img = img.convert("RGB")
-            # Ridimensiona se l'immagine è gigantesca (> 1600px)
+            # Ridimensiona a max 1200px per ottimizzare la velocità su CPU Intel N150
             max_dim = max(img.width, img.height)
-            if max_dim > 1600:
-                resize_scale = 1600.0 / max_dim
+            if max_dim > 1200:
+                resize_scale = 1200.0 / max_dim
                 new_w, new_h = int(img.width * resize_scale), int(img.height * resize_scale)
-                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
             pages_images = [img]
         except Exception as e:
             logger.error(f"Errore apertura immagine: {e}")
@@ -516,7 +537,7 @@ async def run_ocr(
 
     try:
         total_pages_count = len(pages_images)
-        logger.info(f"Avvio elaborazione OCR su {total_pages_count} pagina/e...")
+        logger.info(f"Avvio elaborazione OCR su {total_pages_count} pagina/e (lang={lang}, angle_cls={use_angle_cls})...")
 
         for page_idx, pil_img in enumerate(pages_images):
             img_np = np.array(pil_img)
@@ -524,6 +545,7 @@ async def run_ocr(
             logger.info(f"Elaborazione pagina {page_idx + 1}/{total_pages_count} ({w}x{h})...")
 
             # Invocazione flessibile dell'inferenza (compatibile sia 2.x che 3.x/PaddleX)
+            t_inf_start = time.time()
             raw_result = None
             try:
                 if hasattr(ocr_engine, "predict") and not hasattr(ocr_engine, "text_detector"):
@@ -539,6 +561,8 @@ async def run_ocr(
                     except Exception as call_err:
                         logger.error(f"Errore chiamata inferenza ocr(): {call_err}")
                         raise call_err
+            t_inf_end = time.time()
+            logger.info(f"Pagina {page_idx + 1}: calcolo rete neurale completato in {(t_inf_end - t_inf_start)*1000:.1f} ms")
 
             normalized_lines = normalize_ocr_result(raw_result)
             logger.info(f"Pagina {page_idx + 1}: estratti {len(normalized_lines)} frammenti di testo.")
