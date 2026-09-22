@@ -5,11 +5,15 @@ import base64
 import logging
 from typing import Optional, List, Dict, Any
 
-# Ottimizzazioni per CPU Intel (es. N100 / N150 / N95 / Alder Lake-N):
-# 4 core fisici = 4 thread OpenMP; attivazione oneDNN (MKLDNN) e gestione dinamica memoria
+# Disabilita oneDNN / MKLDNN e PIR per evitare il noto bug di PaddlePaddle 3.x su CPU:
+# "ConvertPirAttribute2RuntimeAttribute not support [pir::ArrayAttribute<pir::DoubleAttribute>]"
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
+os.environ["FLAGS_enable_pir_api"] = "0"
+
+# Ottimizzazioni per CPU Intel N150: 4 core fisici, memoria dinamica
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("MKL_NUM_THREADS", "4")
-os.environ.setdefault("FLAGS_use_mkldnn", "1")
 os.environ.setdefault("FLAGS_allocator_strategy", "auto_growth")
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
@@ -65,6 +69,12 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
     # Disabilita messaggi di debug/info invasivi di PaddleOCR senza usare il parametro rimosso show_log
     logging.getLogger('ppocr').setLevel(logging.ERROR)
     
+    try:
+        import paddle
+        paddle.set_flags({'FLAGS_use_mkldnn': False, 'FLAGS_enable_pir_api': False})
+    except Exception:
+        pass
+
     if use_gpu is None:
         use_gpu = check_gpu_support()
 
@@ -72,21 +82,25 @@ def get_ocr_engine(lang: str = "it", use_angle_cls: bool = True, use_gpu: Option
     if cache_key not in OCR_MODEL_CACHE:
         logger.info(f"Caricamento modello PaddleOCR (lang={lang}, angle_cls={use_angle_cls}, gpu={use_gpu})...")
         device_str = "gpu" if use_gpu else "cpu"
+        engine = None
         last_err = None
 
         # Tentativi di inizializzazione compatibili sia con PaddleOCR 2.x che 3.x / PaddleX
+        # Nota: enable_mkldnn=False è essenziale per evitare il bug ConvertPirAttribute2RuntimeAttribute su CPU Intel
         attempts = [
-            # 1. PaddleOCR 3.x / Modern con textline_orientation e device
+            # 1. PaddleOCR 3.x moderno (use_textline_orientation + device)
+            lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls, device=device_str, enable_mkldnn=False),
+            lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls, enable_mkldnn=False),
+            # 2. PaddleOCR 2.x standard (use_angle_cls + use_gpu)
+            lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, use_gpu=use_gpu, enable_mkldnn=False),
+            lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, enable_mkldnn=False),
+            lambda: PaddleOCR(lang=lang, enable_mkldnn=False),
+            # 3. Senza enable_mkldnn se il parametro non esiste
             lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls, device=device_str),
-            # 2. PaddleOCR 3.x senza parametro device
             lambda: PaddleOCR(lang=lang, use_textline_orientation=use_angle_cls),
-            # 3. PaddleOCR 2.x standard (use_angle_cls + use_gpu)
             lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls, use_gpu=use_gpu),
-            # 4. PaddleOCR 2.x senza use_gpu
             lambda: PaddleOCR(lang=lang, use_angle_cls=use_angle_cls),
-            # 5. Inizializzazione con solo lingua
             lambda: PaddleOCR(lang=lang),
-            # 6. Minimo assoluto (default di sistema)
             lambda: PaddleOCR()
         ]
 
@@ -129,6 +143,94 @@ def extract_images_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Image
         pil_image = bitmap.to_pil()
         images.append(pil_image)
     return images
+
+def normalize_ocr_result(raw_result) -> List[Dict[str, Any]]:
+    """
+    Normalizza l'output OCR in una lista omogenea di riquadri:
+    [
+        {"box": [[x1, y1], [x2, y2], [x3, y3], [x4, y4]], "text": "...", "confidence": 0.95},
+        ...
+    ]
+    Compatibile sia con PaddleOCR 2.x (liste annidate) che con PaddleOCR 3.x / PaddleX
+    (generatori, dict con dt_polys, rec_text/rec_texts, rec_score/rec_scores).
+    """
+    extracted_lines = []
+    if raw_result is None:
+        return extracted_lines
+
+    # Se raw_result è un generatore o iteratore, convertiamolo in lista
+    if not isinstance(raw_result, list):
+        try:
+            raw_result = list(raw_result)
+        except Exception:
+            raw_result = [raw_result]
+
+    if len(raw_result) == 0:
+        return extracted_lines
+
+    first_item = raw_result[0]
+
+    # CASO 1: PaddleOCR 2.x standard -> raw_result = [ [ [box, (text, conf)], ... ] ]
+    if isinstance(first_item, list):
+        for entry in first_item:
+            try:
+                if entry is None or len(entry) < 2:
+                    continue
+                box = entry[0]
+                text_info = entry[1]
+                text = str(text_info[0]) if isinstance(text_info, (list, tuple)) else str(text_info)
+                conf = float(text_info[1]) if isinstance(text_info, (list, tuple)) and len(text_info) > 1 else 1.0
+                
+                box_pts = [[round(float(pt[0]), 1), round(float(pt[1]), 1)] for pt in box]
+                extracted_lines.append({
+                    "box": box_pts,
+                    "text": text,
+                    "confidence": round(conf, 4)
+                })
+            except Exception:
+                continue
+        return extracted_lines
+
+    # CASO 2: PaddleOCR 3.x / PaddleX -> raw_result è una lista di oggetti Result o dizionari
+    for res_obj in raw_result:
+        res_dict = None
+        if hasattr(res_obj, "json") and isinstance(res_obj.json, dict):
+            res_dict = res_obj.json
+        elif hasattr(res_obj, "res") and isinstance(res_obj.res, dict):
+            res_dict = res_obj.res
+        elif isinstance(res_obj, dict):
+            res_dict = res_obj
+
+        if not res_dict:
+            continue
+
+        boxes = res_dict.get("dt_polys") or res_dict.get("dt_boxes") or []
+        texts = res_dict.get("rec_text") or res_dict.get("rec_texts") or []
+        scores = res_dict.get("rec_score") or res_dict.get("rec_scores") or []
+
+        if isinstance(texts, str):
+            texts = [texts]
+        if isinstance(scores, (int, float)):
+            scores = [scores]
+
+        for i in range(len(boxes)):
+            try:
+                box = boxes[i]
+                text = str(texts[i]) if i < len(texts) else ""
+                conf = float(scores[i]) if i < len(scores) else 1.0
+                
+                if hasattr(box, "tolist"):
+                    box = box.tolist()
+                box_pts = [[round(float(pt[0]), 1), round(float(pt[1]), 1)] for pt in box]
+                extracted_lines.append({
+                    "box": box_pts,
+                    "text": text,
+                    "confidence": round(conf, 4)
+                })
+            except Exception:
+                continue
+
+    return extracted_lines
 
 @app.get("/api/languages")
 def get_languages():
@@ -198,26 +300,31 @@ async def run_ocr(
     total_boxes = 0
     all_confidences = []
 
-    for page_idx, pil_img in enumerate(pages_images):
-        img_np = np.array(pil_img)
-        w, h = pil_img.size
+    try:
+        for page_idx, pil_img in enumerate(pages_images):
+            img_np = np.array(pil_img)
+            w, h = pil_img.size
 
-        # Run PaddleOCR con fallback automatico sui parametri di inferenza
-        try:
-            raw_result = ocr_engine.ocr(img_np, cls=use_angle_cls)
-        except TypeError:
-            raw_result = ocr_engine.ocr(img_np)
+            # Invocazione flessibile dell'inferenza (compatibile sia 2.x che 3.x/PaddleX)
+            raw_result = None
+            try:
+                raw_result = ocr_engine.ocr(img_np, cls=use_angle_cls)
+            except (TypeError, ValueError, Exception):
+                try:
+                    raw_result = ocr_engine.ocr(img_np)
+                except Exception as call_err:
+                    logger.error(f"Errore chiamata inferenza ocr(): {call_err}")
+                    raise call_err
 
-        page_lines = []
-        line_counter = 0
+            normalized_lines = normalize_ocr_result(raw_result)
 
-        # raw_result is a list of results (one per image passed in)
-        if raw_result and len(raw_result) > 0 and raw_result[0] is not None:
-            for item in raw_result[0]:
-                box = item[0]  # [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
-                text_info = item[1]  # (text, confidence)
-                text = text_info[0]
-                confidence = float(text_info[1])
+            page_lines = []
+            line_counter = 0
+
+            for item in normalized_lines:
+                box = item["box"]
+                text = item["text"]
+                confidence = float(item["confidence"])
 
                 if confidence >= min_confidence:
                     total_boxes += 1
@@ -226,23 +333,26 @@ async def run_ocr(
                         "id": line_counter,
                         "text": text,
                         "confidence": round(confidence, 4),
-                        "box": [[round(pt[0], 1), round(pt[1], 1)] for pt in box]
+                        "box": box
                     })
                     line_counter += 1
 
-        # Sort lines roughly from top to bottom, then left to right
-        page_lines.sort(key=lambda item: (item["box"][0][1], item["box"][0][0]))
+            # Ordina le righe dall'alto in basso, da sinistra a destra
+            page_lines.sort(key=lambda item: (item["box"][0][1], item["box"][0][0]) if item["box"] else (0, 0))
 
-        full_text = "\n".join([line["text"] for line in page_lines])
+            full_text = "\n".join([line["text"] for line in page_lines])
 
-        pages_result.append({
-            "page_number": page_idx + 1,
-            "width": w,
-            "height": h,
-            "image_data": image_to_base64(pil_img, format="JPEG", quality=85),
-            "lines": page_lines,
-            "full_text": full_text
-        })
+            pages_result.append({
+                "page_number": page_idx + 1,
+                "width": w,
+                "height": h,
+                "image_data": image_to_base64(pil_img, format="JPEG", quality=85),
+                "lines": page_lines,
+                "full_text": full_text
+            })
+    except Exception as e:
+        logger.error(f"Errore inferenza OCR: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Errore elaborazione OCR: {str(e)}")
 
     elapsed_ms = round((time.time() - start_time) * 1000, 1)
     avg_conf = round(sum(all_confidences) / len(all_confidences), 4) if all_confidences else 0.0

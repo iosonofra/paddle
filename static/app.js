@@ -173,8 +173,17 @@ document.addEventListener("DOMContentLoaded", () => {
       });
 
       if (!response.ok) {
-        const err = await response.json().catch(() => ({ detail: "Errore sconosciuto durante l'elaborazione" }));
-        throw new Error(err.detail || `Errore HTTP ${response.status}`);
+        let errorMsg = `Errore HTTP ${response.status}`;
+        try {
+          const err = await response.json();
+          errorMsg = err.detail || errorMsg;
+        } catch (_) {
+          try {
+            const rawText = await response.text();
+            if (rawText && rawText.length < 200) errorMsg = rawText;
+          } catch (__) {}
+        }
+        throw new Error(errorMsg);
       }
 
       const data = await response.json();
